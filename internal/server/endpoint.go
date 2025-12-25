@@ -2,29 +2,60 @@ package server
 
 import (
 	"sync"
+	"time"
 
 	"github.com/RacoonMediaServer/rms-bot-server/internal/comm"
 	"github.com/RacoonMediaServer/rms-packages/pkg/service/servicemgr"
 	"go-micro.dev/v4/logger"
 )
 
-type endpoint struct {
-	l      logger.Logger
-	f      servicemgr.ServiceFactory
-	domain string
-	ch     chan comm.OutgoingMessage
+const (
+	checkDisconnectedSessionInterval  = 5 * time.Second
+	disconnectedSessionNotifyInterval = 30 * time.Second
+)
 
-	mu       sync.RWMutex
-	sessions map[string]*session
+type endpoint struct {
+	l              logger.Logger
+	f              servicemgr.ServiceFactory
+	domain         string
+	ch             chan comm.OutgoingMessage
+	t              *time.Ticker
+	mu             sync.RWMutex
+	sessions       map[string]*session
+	disconnectedAt map[string]time.Time
 }
 
 func newEndpoint(l logger.Logger, f servicemgr.ServiceFactory, domain string) *endpoint {
-	return &endpoint{
-		l:        l,
-		f:        f,
-		domain:   domain,
-		sessions: make(map[string]*session),
-		ch:       make(chan comm.OutgoingMessage, maxMessageQueueSize),
+	e := &endpoint{
+		l:              l,
+		f:              f,
+		t:              time.NewTicker(checkDisconnectedSessionInterval),
+		domain:         domain,
+		sessions:       make(map[string]*session),
+		disconnectedAt: make(map[string]time.Time),
+		ch:             make(chan comm.OutgoingMessage, maxMessageQueueSize),
+	}
+
+	go e.statusNotifier()
+
+	return e
+}
+
+func (e *endpoint) statusNotifier() {
+	for range e.t.C {
+		now := time.Now()
+		e.mu.Lock()
+		toDelete := make([]string, 0, len(e.disconnectedAt))
+		for user, disconnectedAt := range e.disconnectedAt {
+			if now.Sub(disconnectedAt) >= disconnectedSessionNotifyInterval {
+				e.ch <- getDeviceDisconnectedMessage(user)
+				toDelete = append(toDelete, user)
+			}
+		}
+		for _, user := range toDelete {
+			delete(e.disconnectedAt, user)
+		}
+		e.mu.Unlock()
 	}
 }
 

@@ -77,7 +77,16 @@ func (e *endpoint) handler(w http.ResponseWriter, r *http.Request) {
 		existing.drop()
 	}
 	e.sessions[result.userId] = sess
+	_, pending := e.disconnectedAt[result.userId]
+	if pending {
+		delete(e.disconnectedAt, result.userId)
+	}
+	notifyAboutConnect := !pending
 	e.mu.Unlock()
+
+	if notifyAboutConnect {
+		e.ch <- getDeviceConnectedMessage(result.userId)
+	}
 
 	sess.run(r.Context())
 
@@ -85,6 +94,7 @@ func (e *endpoint) handler(w http.ResponseWriter, r *http.Request) {
 	if existing, ok := e.sessions[result.userId]; ok {
 		if existing == sess {
 			delete(e.sessions, result.userId)
+			e.disconnectedAt[result.userId] = time.Now()
 		}
 	}
 	e.mu.Unlock()
