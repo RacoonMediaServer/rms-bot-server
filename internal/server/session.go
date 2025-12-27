@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/RacoonMediaServer/rms-bot-server/internal/comm"
 	"github.com/RacoonMediaServer/rms-packages/pkg/communication"
@@ -18,6 +19,12 @@ type session struct {
 	user   chan *communication.UserMessage
 	out    chan<- comm.OutgoingMessage
 }
+
+const (
+	writeWait  = 10 * time.Second
+	pongWait   = 60 * time.Second
+	pingPeriod = 30 * time.Second // < pongWait
+)
 
 func newSession(l logger.Logger, conn *websocket.Conn, userId string, out chan<- comm.OutgoingMessage) *session {
 	return &session{
@@ -40,6 +47,12 @@ func (s *session) run(ctx context.Context) {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	s.conn.SetReadDeadline(time.Now().Add(pongWait))
+	s.conn.SetPongHandler(func(string) error {
+		s.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 
 	go func() {
 		defer wg.Done()
@@ -65,21 +78,33 @@ func (s *session) run(ctx context.Context) {
 }
 
 func (s *session) writeProcess(ctx context.Context) {
+	pingTimer := time.NewTicker(pingPeriod)
+	defer pingTimer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
 		case msg := <-s.user:
 			buf, err := proto.Marshal(msg)
 			if err != nil {
 				s.l.Logf(logger.ErrorLevel, "serialize message failed: %s", err)
 				continue
 			}
+			s.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err = s.conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
 				s.l.Logf(logger.ErrorLevel, "write message failed: %s", err)
 				continue
 			}
 			s.l.Logf(logger.DebugLevel, "message sent to device: %s", msg)
+
+		case <-pingTimer.C:
+			s.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := s.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				s.l.Logf(logger.ErrorLevel, "send ping failed: %s", err)
+				return
+			}
 		}
 	}
 }
